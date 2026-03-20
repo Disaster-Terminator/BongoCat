@@ -1,3 +1,4 @@
+import type { Model } from '@/stores/model'
 import type { MonitorPoint } from '@/utils/monitor'
 import type { Monitor } from '@tauri-apps/api/window'
 
@@ -229,13 +230,16 @@ export function useModel() {
     return true
   }
 
-  async function handleLoad() {
+  async function handleLoad(
+    model: Model | undefined = modelStore.currentModel,
+    options: { showError?: boolean } = {},
+  ) {
     try {
-      if (!modelStore.currentModel) return
+      if (!model) return false
 
       hasCompletedInitialWindowSizeSync = false
 
-      const { path } = modelStore.currentModel
+      const { path } = model
 
       await resolveResource(path)
 
@@ -248,8 +252,17 @@ export function useModel() {
       applyRenderedMouseRatios()
 
       Object.assign(modelStore, rest)
+
+      return true
     } catch (error) {
-      message.error(String(error))
+      modelSize.value = void 0
+      parameterRanges.clear()
+
+      if (options.showError ?? true) {
+        message.error(String(error))
+      }
+
+      return false
     }
   }
 

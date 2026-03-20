@@ -34,6 +34,7 @@ const backgroundImagePath = ref<string>()
 const { stickActive } = useGamepad()
 const { isMounted, setWindowPosition } = useWindowPosition()
 const isCanvasReady = ref(false)
+const INITIAL_MODEL_LOAD_RETRY_DELAY_MS = 100
 let loadedModelId: string | undefined
 let modelLoadVersion = 0
 
@@ -58,6 +59,12 @@ function waitForAnimationFrame() {
   })
 }
 
+function waitForDelay(delayMs: number) {
+  return new Promise<void>((resolve) => {
+    setTimeout(resolve, delayMs)
+  })
+}
+
 async function ensureCanvasReady() {
   await nextTick()
 
@@ -75,23 +82,38 @@ async function ensureCanvasReady() {
   isCanvasReady.value = true
 }
 
-async function loadCurrentModel(model = modelStore.currentModel) {
-  if (!model) return
+async function loadCurrentModel(
+  model = modelStore.currentModel,
+  options: { retryOnFailure?: boolean } = {},
+) {
+  if (!model) return false
 
   const version = ++modelLoadVersion
+  let didLoad = await handleLoad(model, { showError: !options.retryOnFailure })
 
-  await handleLoad()
-  if (version !== modelLoadVersion) return
+  if (!didLoad && options.retryOnFailure) {
+    await waitForDelay(INITIAL_MODEL_LOAD_RETRY_DELAY_MS)
+
+    if (version !== modelLoadVersion || modelStore.currentModel?.id !== model.id) {
+      return false
+    }
+
+    didLoad = await handleLoad(model)
+  }
+
+  if (!didLoad || version !== modelLoadVersion || !modelSize.value) {
+    return false
+  }
 
   await syncWindowSize()
-  if (version !== modelLoadVersion) return
+  if (version !== modelLoadVersion) return false
 
   const path = join(model.path, 'resources', 'background.png')
 
   const existed = await exists(path)
 
   backgroundImagePath.value = existed ? convertFileSrc(path) : void 0
-  if (version !== modelLoadVersion) return
+  if (version !== modelLoadVersion) return false
 
   clearObject([modelStore.supportKeys, modelStore.pressedKeys])
 
@@ -110,16 +132,18 @@ async function loadCurrentModel(model = modelStore.currentModel) {
     }
   }
 
-  if (version !== modelLoadVersion) return
+  if (version !== modelLoadVersion) return false
 
   loadedModelId = model.id
   void setWindowPosition()
+
+  return true
 }
 
 onMounted(async () => {
   startListening()
   await ensureCanvasReady()
-  await loadCurrentModel()
+  await loadCurrentModel(modelStore.currentModel, { retryOnFailure: true })
 })
 
 watch(() => modelStore.currentModel?.id, async (modelId) => {
