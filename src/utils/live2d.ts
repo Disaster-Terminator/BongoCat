@@ -36,7 +36,11 @@ class Live2d {
   private initApp() {
     if (this.app) return
 
-    const view = document.getElementById('live2dCanvas') as HTMLCanvasElement
+    const view = document.getElementById('live2dCanvas')
+
+    if (!(view instanceof HTMLCanvasElement)) {
+      throw new TypeError('[live2d] #live2dCanvas is not ready')
+    }
 
     this.app = new Application({
       view,

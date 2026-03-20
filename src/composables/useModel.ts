@@ -20,6 +20,18 @@ const MOUSE_FOLLOW_SPEED = 40
 const MOUSE_FOLLOW_STOP_EPSILON = 0.001
 const MAX_MOUSE_FOLLOW_DT_MS = 48
 const DEFAULT_MOUSE_RATIO = 0.5
+const LOW_FPS_FRAME_MS = 20
+const LOW_FPS_SPEED_FACTOR = 1.6
+const MAX_LOW_FPS_SPEED_BOOST = 40
+const DISTANCE_SPEED_FACTOR = 140
+const MAX_DISTANCE_SPEED_BOOST = 70
+const LARGE_DISTANCE_THRESHOLD = 0.12
+const LARGE_DISTANCE_MIN_ALPHA = 0.75
+const REVERSAL_INPUT_THRESHOLD = 0.015
+const REVERSAL_SPEED_BOOST = 55
+const REVERSAL_MIN_ALPHA = 0.82
+const REVERSAL_BOOST_TICKS = 2
+const MAX_MOUSE_FOLLOW_ALPHA = 0.92
 const parameterRanges = new Map<string, { min: number, max: number }>()
 const modelSize = ref<ModelSize>()
 let targetMouseXRatio = DEFAULT_MOUSE_RATIO
@@ -32,13 +44,16 @@ let mouseFollowAttached = false
 let readMouseMirror = () => false
 let suppressScaleWriteback = false
 let hasCompletedInitialWindowSizeSync = false
+let lastTargetInputDeltaX = 0
+let lastTargetInputDeltaY = 0
+let reversalBoostTicksRemaining = 0
 
 function clampRatio(value: number) {
   return Math.max(0, Math.min(1, value))
 }
 
-function getFollowAlpha(dtSeconds: number) {
-  return 1 - Math.exp(-MOUSE_FOLLOW_SPEED * dtSeconds)
+function getFollowAlpha(followSpeed: number, dtSeconds: number) {
+  return 1 - Math.exp(-followSpeed * dtSeconds)
 }
 
 export interface ModelSize {
@@ -76,7 +91,9 @@ function applyRenderedMouseRatios() {
 
     const isXAxis = id.endsWith('X')
     const ratio = isXAxis ? renderedMouseXRatio : renderedMouseYRatio
-    let value = max - (ratio * (max - min))
+    let value = isXAxis
+      ? max - (ratio * (max - min))
+      : min + (ratio * (max - min))
 
     if (isXAxis && readMouseMirror()) {
       value *= -1
@@ -100,10 +117,35 @@ function stepMouseFollow(deltaMs: number) {
   }
 
   const nextDeltaMs = deltaMs > 0 ? deltaMs : 16.667
-  const alpha = getFollowAlpha(Math.min(nextDeltaMs, MAX_MOUSE_FOLLOW_DT_MS) / 1000)
+  const dtSeconds = Math.min(nextDeltaMs, MAX_MOUSE_FOLLOW_DT_MS) / 1000
+  const deltaX = targetMouseXRatio - renderedMouseXRatio
+  const deltaY = targetMouseYRatio - renderedMouseYRatio
+  const distance = Math.max(Math.abs(deltaX), Math.abs(deltaY))
+  const lowFpsBoost = Math.min(
+    MAX_LOW_FPS_SPEED_BOOST,
+    Math.max(0, nextDeltaMs - LOW_FPS_FRAME_MS) * LOW_FPS_SPEED_FACTOR,
+  )
+  const distanceBoost = Math.min(
+    MAX_DISTANCE_SPEED_BOOST,
+    distance * DISTANCE_SPEED_FACTOR,
+  )
+  const reversalBoost = reversalBoostTicksRemaining > 0 ? REVERSAL_SPEED_BOOST : 0
+  const followSpeed = MOUSE_FOLLOW_SPEED + lowFpsBoost + distanceBoost + reversalBoost
+  let alpha = getFollowAlpha(followSpeed, dtSeconds)
 
-  renderedMouseXRatio += (targetMouseXRatio - renderedMouseXRatio) * alpha
-  renderedMouseYRatio += (targetMouseYRatio - renderedMouseYRatio) * alpha
+  if (distance >= LARGE_DISTANCE_THRESHOLD) {
+    alpha = Math.max(alpha, LARGE_DISTANCE_MIN_ALPHA)
+  }
+
+  if (reversalBoostTicksRemaining > 0) {
+    alpha = Math.max(alpha, REVERSAL_MIN_ALPHA)
+    reversalBoostTicksRemaining -= 1
+  }
+
+  alpha = Math.min(alpha, MAX_MOUSE_FOLLOW_ALPHA)
+
+  renderedMouseXRatio += deltaX * alpha
+  renderedMouseYRatio += deltaY * alpha
 
   const xSettled = Math.abs(targetMouseXRatio - renderedMouseXRatio) <= MOUSE_FOLLOW_STOP_EPSILON
   const ySettled = Math.abs(targetMouseYRatio - renderedMouseYRatio) <= MOUSE_FOLLOW_STOP_EPSILON
@@ -138,6 +180,9 @@ function resetMouseFollowState() {
   renderedMouseYRatio = DEFAULT_MOUSE_RATIO
   hasRenderedMouseRatio = false
   lastResolvedMouseMonitor = void 0
+  lastTargetInputDeltaX = 0
+  lastTargetInputDeltaY = 0
+  reversalBoostTicksRemaining = 0
 }
 
 export function useModel() {
@@ -161,9 +206,25 @@ export function useModel() {
     if (!monitor) return false
 
     const { size, position } = monitor
+    const nextTargetMouseXRatio = clampRatio((cursorPoint.x - position.x) / size.width)
+    const nextTargetMouseYRatio = clampRatio((cursorPoint.y - position.y) / size.height)
+    const nextTargetDeltaX = nextTargetMouseXRatio - targetMouseXRatio
+    const nextTargetDeltaY = nextTargetMouseYRatio - targetMouseYRatio
+    const xReversed = Math.abs(lastTargetInputDeltaX) > REVERSAL_INPUT_THRESHOLD
+      && Math.abs(nextTargetDeltaX) > REVERSAL_INPUT_THRESHOLD
+      && Math.sign(lastTargetInputDeltaX) !== Math.sign(nextTargetDeltaX)
+    const yReversed = Math.abs(lastTargetInputDeltaY) > REVERSAL_INPUT_THRESHOLD
+      && Math.abs(nextTargetDeltaY) > REVERSAL_INPUT_THRESHOLD
+      && Math.sign(lastTargetInputDeltaY) !== Math.sign(nextTargetDeltaY)
 
-    targetMouseXRatio = clampRatio((cursorPoint.x - position.x) / size.width)
-    targetMouseYRatio = clampRatio((cursorPoint.y - position.y) / size.height)
+    if (xReversed || yReversed) {
+      reversalBoostTicksRemaining = REVERSAL_BOOST_TICKS
+    }
+
+    lastTargetInputDeltaX = nextTargetDeltaX
+    lastTargetInputDeltaY = nextTargetDeltaY
+    targetMouseXRatio = nextTargetMouseXRatio
+    targetMouseYRatio = nextTargetMouseYRatio
 
     return true
   }

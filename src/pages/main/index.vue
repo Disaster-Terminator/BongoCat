@@ -7,7 +7,7 @@ import { exists, readDir } from '@tauri-apps/plugin-fs'
 import { useDebounceFn, useEventListener } from '@vueuse/core'
 import { round } from 'es-toolkit'
 import { nth } from 'es-toolkit/compat'
-import { onMounted, onUnmounted, ref, watch } from 'vue'
+import { nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 
 import { useDevice } from '@/composables/useDevice'
 import { useGamepad } from '@/composables/useGamepad'
@@ -33,8 +33,9 @@ const resizing = ref(false)
 const backgroundImagePath = ref<string>()
 const { stickActive } = useGamepad()
 const { isMounted, setWindowPosition } = useWindowPosition()
-
-onMounted(startListening)
+const isCanvasReady = ref(false)
+let loadedModelId: string | undefined
+let modelLoadVersion = 0
 
 onUnmounted(handleDestroy)
 
@@ -52,17 +53,46 @@ useEventListener('resize', () => {
   debouncedResize()
 })
 
-watch(() => modelStore.currentModel, async (model) => {
+function waitForAnimationFrame() {
+  return new Promise<void>((resolve) => {
+    requestAnimationFrame(() => resolve())
+  })
+}
+
+async function ensureCanvasReady() {
+  await nextTick()
+
+  let canvas = document.getElementById('live2dCanvas')
+
+  if (!(canvas instanceof HTMLCanvasElement)) {
+    await waitForAnimationFrame()
+    canvas = document.getElementById('live2dCanvas')
+  }
+
+  if (!(canvas instanceof HTMLCanvasElement)) {
+    throw new TypeError('[main] #live2dCanvas is not ready')
+  }
+
+  isCanvasReady.value = true
+}
+
+async function loadCurrentModel(model = modelStore.currentModel) {
   if (!model) return
 
+  const version = ++modelLoadVersion
+
   await handleLoad()
+  if (version !== modelLoadVersion) return
+
   await syncWindowSize()
+  if (version !== modelLoadVersion) return
 
   const path = join(model.path, 'resources', 'background.png')
 
   const existed = await exists(path)
 
   backgroundImagePath.value = existed ? convertFileSrc(path) : void 0
+  if (version !== modelLoadVersion) return
 
   clearObject([modelStore.supportKeys, modelStore.pressedKeys])
 
@@ -81,8 +111,23 @@ watch(() => modelStore.currentModel, async (model) => {
     }
   }
 
-  setWindowPosition()
-}, { deep: true, immediate: true })
+  if (version !== modelLoadVersion) return
+
+  await setWindowPosition()
+  loadedModelId = model.id
+}
+
+onMounted(async () => {
+  startListening()
+  await ensureCanvasReady()
+  await loadCurrentModel()
+})
+
+watch(() => modelStore.currentModel?.id, async (modelId) => {
+  if (!isCanvasReady.value || !modelId || modelId === loadedModelId) return
+
+  await loadCurrentModel()
+})
 
 watch(() => catStore.window.scale, async () => {
   if (!modelSize.value) return
