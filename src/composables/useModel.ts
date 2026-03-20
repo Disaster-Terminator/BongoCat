@@ -1,4 +1,4 @@
-import type { PhysicalPosition } from '@tauri-apps/api/dpi'
+import type { MonitorPoint } from '@/utils/monitor'
 
 import { LogicalSize } from '@tauri-apps/api/dpi'
 import { resolveResource, sep } from '@tauri-apps/api/path'
@@ -14,14 +14,13 @@ import { useCatStore } from '@/stores/cat'
 import { useModelStore } from '@/stores/model'
 import { getCursorMonitor } from '@/utils/monitor'
 
-const appWindow = getCurrentWebviewWindow()
-
 export interface ModelSize {
   width: number
   height: number
 }
 
 export function useModel() {
+  const getAppWindow = () => getCurrentWebviewWindow()
   const modelStore = useModelStore()
   const catStore = useCatStore()
   const modelSize = ref<ModelSize>()
@@ -56,6 +55,7 @@ export function useModel() {
     live2d.resizeModel(modelSize.value)
 
     const { width, height } = modelSize.value
+    const appWindow = getAppWindow()
 
     if (round(innerWidth / innerHeight, 1) !== round(width / height, 1)) {
       await appWindow.setSize(
@@ -107,10 +107,15 @@ export function useModel() {
     live2d.setParameterValue(id, pressed)
   }
 
-  async function handleMouseMove(cursorPoint: PhysicalPosition) {
+  async function handleMouseMove(
+    cursorPoint: MonitorPoint,
+    { isLatest = () => true }: { isLatest?: () => boolean } = {},
+  ) {
+    if (!isLatest() || !live2d.model) return
+
     const monitor = await getCursorMonitor(cursorPoint)
 
-    if (!monitor) return
+    if (!monitor || !isLatest() || !live2d.model) return
 
     const { size, position } = monitor
 

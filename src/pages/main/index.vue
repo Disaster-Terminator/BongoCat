@@ -113,10 +113,6 @@ watch(() => catStore.window.visible, async (value) => {
   value ? showWindow() : hideWindow()
 })
 
-watch(() => catStore.window.passThrough, (value) => {
-  appWindow.setIgnoreCursorEvents(value)
-}, { immediate: true })
-
 watch(() => catStore.window.alwaysOnTop, setAlwaysOnTop, { immediate: true })
 
 watch(() => generalStore.app.taskbarVisible, setTaskbarVisibility, { immediate: true })
