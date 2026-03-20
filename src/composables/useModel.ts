@@ -30,6 +30,8 @@ let hasRenderedMouseRatio = false
 let lastResolvedMouseMonitor: Monitor | undefined
 let mouseFollowAttached = false
 let readMouseMirror = () => false
+let suppressScaleWriteback = false
+let hasCompletedInitialWindowSizeSync = false
 
 function clampRatio(value: number) {
   return Math.max(0, Math.min(1, value))
@@ -170,6 +172,8 @@ export function useModel() {
     try {
       if (!modelStore.currentModel) return
 
+      hasCompletedInitialWindowSizeSync = false
+
       const { path } = modelStore.currentModel
 
       await resolveResource(path)
@@ -199,6 +203,11 @@ export function useModel() {
 
     live2d.resizeModel(modelSize.value)
 
+    if (!hasCompletedInitialWindowSizeSync || suppressScaleWriteback) {
+      suppressScaleWriteback = false
+      return
+    }
+
     const { width } = modelSize.value
     const size = await appWindow.innerSize()
     const nextScale = round((size.width / width) * 100)
@@ -216,16 +225,25 @@ export function useModel() {
     const nextHeight = Math.round(height * (catStore.window.scale / 100))
     const size = await appWindow.innerSize()
 
+    hasCompletedInitialWindowSizeSync = true
+
     if (size.width === nextWidth && size.height === nextHeight) {
       return
     }
 
-    await appWindow.setSize(
-      new PhysicalSize({
-        width: nextWidth,
-        height: nextHeight,
-      }),
-    )
+    suppressScaleWriteback = true
+
+    try {
+      await appWindow.setSize(
+        new PhysicalSize({
+          width: nextWidth,
+          height: nextHeight,
+        }),
+      )
+    } catch (error) {
+      suppressScaleWriteback = false
+      throw error
+    }
   }
 
   const handlePress = (key: string) => {

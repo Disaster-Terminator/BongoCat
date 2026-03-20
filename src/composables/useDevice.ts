@@ -59,10 +59,10 @@ export function useDevice() {
   const releaseTimers = new Map<string, ReturnType<typeof setTimeout>>()
   const catStore = useCatStore()
   const { handlePress, handleRelease, handleMouseChange, handleMouseMove } = useModel()
-  let latestCursorPoint: CursorPoint | undefined
   let lastCursorPoint: CursorPoint | undefined
+  let latestHoverCursorPoint: CursorPoint | undefined
   let isHoverHidden = false
-  let mouseMoveFrameId: number | undefined
+  let hoverEffectFrameId: number | undefined
   let windowBounds: WindowBounds | undefined
   let requestedIgnoreCursorEvents = false
   let appliedIgnoreCursorEvents: boolean | undefined
@@ -186,40 +186,39 @@ export function useDevice() {
     setHoverHidden(isInWindow)
   }
 
-  const flushMouseMove = () => {
-    mouseMoveFrameId = void 0
+  const flushHoverEffect = () => {
+    hoverEffectFrameId = void 0
 
-    if (!latestCursorPoint) return
-
-    const cursorPoint = latestCursorPoint
-
-    latestCursorPoint = void 0
-    lastCursorPoint = cursorPoint
+    if (!latestHoverCursorPoint) return
 
     try {
-      handleMouseMove(cursorPoint)
+      updateHideOnHover(latestHoverCursorPoint)
+    } catch (error) {
+      reportDeviceWarning('hover-effect', error)
+    }
+  }
+
+  const scheduleHoverEffect = () => {
+    if (hoverEffectFrameId) return
+
+    hoverEffectFrameId = requestAnimationFrame(flushHoverEffect)
+  }
+
+  const handleCursorMove = (cursorPoint: CursorPoint) => {
+    const nextCursorPoint = { x: cursorPoint.x, y: cursorPoint.y }
+
+    lastCursorPoint = nextCursorPoint
+
+    try {
+      handleMouseMove(nextCursorPoint)
     } catch (error) {
       reportDeviceWarning('mouse-move', error)
     }
 
-    if (catStore.window.hideOnHover) {
-      try {
-        updateHideOnHover(cursorPoint)
-      } catch (error) {
-        reportDeviceWarning('hover-effect', error)
-      }
-    }
-  }
+    if (!catStore.window.hideOnHover) return
 
-  const scheduleMouseMove = () => {
-    if (mouseMoveFrameId) return
-
-    mouseMoveFrameId = requestAnimationFrame(flushMouseMove)
-  }
-
-  const handleCursorMove = (cursorPoint: CursorPoint) => {
-    latestCursorPoint = { x: cursorPoint.x, y: cursorPoint.y }
-    scheduleMouseMove()
+    latestHoverCursorPoint = nextCursorPoint
+    scheduleHoverEffect()
   }
 
   const handleAutoRelease = (key: string, delay = 100) => {
@@ -249,8 +248,8 @@ export function useDevice() {
     }
 
     if (lastCursorPoint) {
-      latestCursorPoint = lastCursorPoint
-      scheduleMouseMove()
+      latestHoverCursorPoint = lastCursorPoint
+      scheduleHoverEffect()
     }
   })
 
@@ -259,9 +258,9 @@ export function useDevice() {
   }, { immediate: true })
 
   onUnmounted(() => {
-    if (mouseMoveFrameId) {
-      cancelAnimationFrame(mouseMoveFrameId)
-      mouseMoveFrameId = void 0
+    if (hoverEffectFrameId) {
+      cancelAnimationFrame(hoverEffectFrameId)
+      hoverEffectFrameId = void 0
     }
 
     for (const [key, timer] of releaseTimers.entries()) {
@@ -270,8 +269,8 @@ export function useDevice() {
     }
 
     releaseTimers.clear()
-    latestCursorPoint = void 0
     lastCursorPoint = void 0
+    latestHoverCursorPoint = void 0
     resetHideOnHover()
   })
 
