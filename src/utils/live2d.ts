@@ -14,6 +14,7 @@ import { i18n } from '@/locales'
 Live2DModel.registerTicker(Ticker)
 
 type FrameListener = (deltaMs: number) => void
+const MAX_RENDER_RESOLUTION = 1.25
 
 class Live2d {
   private app: Application | null = null
@@ -46,7 +47,7 @@ class Live2d {
       view,
       resizeTo: window,
       backgroundAlpha: 0,
-      resolution: devicePixelRatio,
+      resolution: Math.min(devicePixelRatio, MAX_RENDER_RESOLUTION),
     })
 
     this.syncFrameListeners()

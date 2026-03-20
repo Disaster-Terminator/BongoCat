@@ -41,8 +41,7 @@ onUnmounted(handleDestroy)
 
 const debouncedResize = useDebounceFn(async () => {
   await handleResize()
-
-  await setWindowPosition()
+  void setWindowPosition()
 
   resizing.value = false
 }, 100)
@@ -113,8 +112,8 @@ async function loadCurrentModel(model = modelStore.currentModel) {
 
   if (version !== modelLoadVersion) return
 
-  await setWindowPosition()
   loadedModelId = model.id
+  void setWindowPosition()
 }
 
 onMounted(async () => {
