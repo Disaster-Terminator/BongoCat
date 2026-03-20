@@ -16,17 +16,18 @@ export function useWindowPosition() {
 
     if (!monitor) return
 
+    const { position, size } = monitor
     const windowSize = await appWindow.outerSize()
 
     switch (catStore.window.position) {
       case 'topLeft':
-        return appWindow.setPosition(new PhysicalPosition(0, 0))
+        return appWindow.setPosition(new PhysicalPosition(position.x, position.y))
       case 'topRight':
-        return appWindow.setPosition(new PhysicalPosition(monitor.size.width - windowSize.width, 0))
+        return appWindow.setPosition(new PhysicalPosition(position.x + size.width - windowSize.width, position.y))
       case 'bottomLeft':
-        return appWindow.setPosition(new PhysicalPosition(0, monitor.size.height - windowSize.height))
+        return appWindow.setPosition(new PhysicalPosition(position.x, position.y + size.height - windowSize.height))
       default:
-        return appWindow.setPosition(new PhysicalPosition(monitor.size.width - windowSize.width, monitor.size.height - windowSize.height))
+        return appWindow.setPosition(new PhysicalPosition(position.x + size.width - windowSize.width, position.y + size.height - windowSize.height))
     }
   }
 

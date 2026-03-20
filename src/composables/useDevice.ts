@@ -1,15 +1,18 @@
 import { invoke } from '@tauri-apps/api/core'
 import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow'
-import { onUnmounted, watch } from 'vue'
+import { isNumber } from 'es-toolkit/compat'
+import { onUnmounted, watch, watchEffect } from 'vue'
 
 import { INVOKE_KEY, LISTEN_KEY } from '../constants'
 
 import { useModel } from './useModel'
 import { useTauriListen } from './useTauriListen'
 
+import { useAppStore } from '@/stores/app'
 import { useCatStore } from '@/stores/cat'
 import { useModelStore } from '@/stores/model'
 import { inBetween } from '@/utils/is'
+import { refreshMonitorCache } from '@/utils/monitor'
 import { isWindows } from '@/utils/platform'
 
 interface MouseButtonEvent {
@@ -33,9 +36,9 @@ interface KeyboardEvent {
 }
 
 type DeviceEvent = MouseButtonEvent | MouseMoveEvent | KeyboardEvent
-const MOUSE_MOVE_FRAME_MS = 16
 const DEVICE_WARNING_INTERVAL_MS = 5000
 const deviceWarningAt = new Map<string, number>()
+type WindowBounds = CursorPoint & { width: number, height: number }
 
 function reportDeviceWarning(key: string, error: unknown) {
   if (!import.meta.env.DEV) return
@@ -50,23 +53,25 @@ function reportDeviceWarning(key: string, error: unknown) {
 }
 
 export function useDevice() {
+  const appWindow = getCurrentWebviewWindow()
+  const appStore = useAppStore()
   const modelStore = useModelStore()
   const releaseTimers = new Map<string, ReturnType<typeof setTimeout>>()
   const catStore = useCatStore()
   const { handlePress, handleRelease, handleMouseChange, handleMouseMove } = useModel()
   let latestCursorPoint: CursorPoint | undefined
+  let lastCursorPoint: CursorPoint | undefined
   let isHoverHidden = false
-  let lastMouseMoveAt = 0
-  let mouseMoveVersion = 0
-  let hoverEffectVersion = 0
-  let mouseMoveTimer: ReturnType<typeof setTimeout> | undefined
-  let ignoreCursorEventsTask: Promise<void> = Promise.resolve()
+  let mouseMoveFrameId: number | undefined
+  let windowBounds: WindowBounds | undefined
+  let requestedIgnoreCursorEvents = false
+  let appliedIgnoreCursorEvents: boolean | undefined
+  let ignoreCursorEventsSyncing = false
 
   const startListening = () => {
+    void refreshMonitorCache()
     invoke(INVOKE_KEY.START_DEVICE_LISTENING)
   }
-
-  const getAppWindow = () => getCurrentWebviewWindow()
 
   const getSupportedKey = (key: string) => {
     let nextKey = key
@@ -87,119 +92,129 @@ export function useDevice() {
     return nextKey
   }
 
-  const isLatestMouseMove = (version: number) => version === mouseMoveVersion
-  const nextHoverEffectGuard = () => {
-    hoverEffectVersion += 1
+  const syncWindowBounds = () => {
+    const state = appStore.windowState[appWindow.label]
 
-    const version = hoverEffectVersion
+    if (!state) return
 
-    return () => version === hoverEffectVersion
+    const { x, y, width, height } = state
+
+    if (isNumber(x) && isNumber(y) && isNumber(width) && isNumber(height)) {
+      windowBounds = { x, y, width, height }
+    }
   }
 
-  const syncIgnoreCursorEventsSafe = (
-    { isLatest = () => true }: { isLatest?: () => boolean } = {},
-  ) => {
-    ignoreCursorEventsTask = ignoreCursorEventsTask
-      .catch((error) => {
-        reportDeviceWarning('ignore-cursor-events', error)
-      })
-      .then(async () => {
-        if (!isLatest()) return
-
-        try {
-          await getAppWindow().setIgnoreCursorEvents(isHoverHidden || catStore.window.passThrough)
-        } catch (error) {
-          reportDeviceWarning('ignore-cursor-events', error)
-        }
-      })
-
-    return ignoreCursorEventsTask
-  }
-
-  const resetHideOnHover = async (
-    { isLatest = () => true }: { isLatest?: () => boolean } = {},
-  ) => {
-    if (!isLatest()) return
-
-    isHoverHidden = false
-    document.body.style.removeProperty('opacity')
-    await syncIgnoreCursorEventsSafe({ isLatest })
-  }
-
-  const updateHideOnHover = async (
-    cursorPoint: CursorPoint,
-    { isLatest = () => true }: { isLatest?: () => boolean } = {},
-  ) => {
-    if (!isLatest()) return
-    if (!catStore.window.hideOnHover) return
-
-    const appWindow = getAppWindow()
-    let position: CursorPoint
-    let width: number
-    let height: number
-
+  const refreshWindowBounds = async () => {
     try {
-      [position, { width, height }] = await Promise.all([
+      const [position, size] = await Promise.all([
         appWindow.outerPosition(),
         appWindow.innerSize(),
       ])
+
+      windowBounds = {
+        x: position.x,
+        y: position.y,
+        width: size.width,
+        height: size.height,
+      }
     } catch (error) {
       reportDeviceWarning('hover-window-bounds', error)
-      return
     }
+  }
 
-    if (!isLatest()) return
-    if (!catStore.window.hideOnHover) return
+  watchEffect(syncWindowBounds)
+  void refreshWindowBounds()
 
-    const isInWindow = inBetween(cursorPoint.x, position.x, position.x + width)
-      && inBetween(cursorPoint.y, position.y, position.y + height)
+  const flushIgnoreCursorEvents = () => {
+    requestedIgnoreCursorEvents = isHoverHidden || catStore.window.passThrough
 
-    if (!isLatest()) return
+    if (ignoreCursorEventsSyncing) return
 
-    isHoverHidden = isInWindow
-    if (isInWindow) {
+    ignoreCursorEventsSyncing = true
+
+    void (async () => {
+      try {
+        while (appliedIgnoreCursorEvents !== requestedIgnoreCursorEvents) {
+          const nextValue = requestedIgnoreCursorEvents
+
+          await appWindow.setIgnoreCursorEvents(nextValue)
+
+          appliedIgnoreCursorEvents = nextValue
+        }
+      } catch (error) {
+        reportDeviceWarning('ignore-cursor-events', error)
+      } finally {
+        ignoreCursorEventsSyncing = false
+
+        if (appliedIgnoreCursorEvents !== requestedIgnoreCursorEvents) {
+          flushIgnoreCursorEvents()
+        }
+      }
+    })()
+  }
+
+  const setHoverHidden = (hidden: boolean) => {
+    if (isHoverHidden === hidden) return
+
+    isHoverHidden = hidden
+
+    if (hidden) {
       document.body.style.setProperty('opacity', '0')
     } else {
       document.body.style.removeProperty('opacity')
     }
 
-    await syncIgnoreCursorEventsSafe({ isLatest })
+    flushIgnoreCursorEvents()
   }
 
-  const scheduleMouseMove = () => {
-    if (mouseMoveTimer) return
+  const resetHideOnHover = () => {
+    document.body.style.removeProperty('opacity')
+    setHoverHidden(false)
+  }
 
-    const delay = Math.max(0, MOUSE_MOVE_FRAME_MS - (performance.now() - lastMouseMoveAt))
+  const updateHideOnHover = (cursorPoint: CursorPoint) => {
+    if (!catStore.window.hideOnHover) return
 
-    mouseMoveTimer = setTimeout(() => {
-      mouseMoveTimer = void 0
-      void flushMouseMove()
-    }, delay)
+    if (!windowBounds) {
+      void refreshWindowBounds()
+      return
+    }
+
+    const isInWindow = inBetween(cursorPoint.x, windowBounds.x, windowBounds.x + windowBounds.width)
+      && inBetween(cursorPoint.y, windowBounds.y, windowBounds.y + windowBounds.height)
+
+    setHoverHidden(isInWindow)
   }
 
   const flushMouseMove = () => {
+    mouseMoveFrameId = void 0
+
     if (!latestCursorPoint) return
 
     const cursorPoint = latestCursorPoint
-    lastMouseMoveAt = performance.now()
+
     latestCursorPoint = void 0
-    mouseMoveVersion += 1
+    lastCursorPoint = cursorPoint
 
-    const version = mouseMoveVersion
-
-    const isLatest = () => isLatestMouseMove(version)
-
-    void handleMouseMove(cursorPoint, { isLatest }).catch((error) => {
+    try {
+      handleMouseMove(cursorPoint)
+    } catch (error) {
       reportDeviceWarning('mouse-move', error)
-    })
+    }
 
     if (catStore.window.hideOnHover) {
-      const isLatestHoverEffect = nextHoverEffectGuard()
-
-      void updateHideOnHover(cursorPoint, { isLatest: isLatestHoverEffect }).catch((error) => {
+      try {
+        updateHideOnHover(cursorPoint)
+      } catch (error) {
         reportDeviceWarning('hover-effect', error)
-      })
+      }
     }
+  }
+
+  const scheduleMouseMove = () => {
+    if (mouseMoveFrameId) return
+
+    mouseMoveFrameId = requestAnimationFrame(flushMouseMove)
   }
 
   const handleCursorMove = (cursorPoint: CursorPoint) => {
@@ -224,21 +239,29 @@ export function useDevice() {
   }
 
   watch(() => catStore.window.hideOnHover, (enabled) => {
-    const isLatestHoverEffect = nextHoverEffectGuard()
-
     if (!enabled) {
-      void resetHideOnHover({ isLatest: isLatestHoverEffect })
+      resetHideOnHover()
+      return
+    }
+
+    if (!windowBounds) {
+      void refreshWindowBounds()
+    }
+
+    if (lastCursorPoint) {
+      latestCursorPoint = lastCursorPoint
+      scheduleMouseMove()
     }
   })
 
   watch(() => catStore.window.passThrough, () => {
-    void syncIgnoreCursorEventsSafe()
+    flushIgnoreCursorEvents()
   }, { immediate: true })
 
   onUnmounted(() => {
-    if (mouseMoveTimer) {
-      clearTimeout(mouseMoveTimer)
-      mouseMoveTimer = void 0
+    if (mouseMoveFrameId) {
+      cancelAnimationFrame(mouseMoveFrameId)
+      mouseMoveFrameId = void 0
     }
 
     for (const [key, timer] of releaseTimers.entries()) {
@@ -247,13 +270,9 @@ export function useDevice() {
     }
 
     releaseTimers.clear()
-    mouseMoveVersion += 1
     latestCursorPoint = void 0
-    isHoverHidden = false
-
-    const isLatestHoverEffect = nextHoverEffectGuard()
-
-    void resetHideOnHover({ isLatest: isLatestHoverEffect })
+    lastCursorPoint = void 0
+    resetHideOnHover()
   })
 
   useTauriListen<DeviceEvent>(LISTEN_KEY.DEVICE_CHANGED, ({ payload }) => {

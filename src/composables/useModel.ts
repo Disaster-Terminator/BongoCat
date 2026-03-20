@@ -1,4 +1,5 @@
 import type { MonitorPoint } from '@/utils/monitor'
+import type { Monitor } from '@tauri-apps/api/window'
 
 import { LogicalSize } from '@tauri-apps/api/dpi'
 import { resolveResource, sep } from '@tauri-apps/api/path'
@@ -12,18 +13,163 @@ import live2d from '../utils/live2d'
 
 import { useCatStore } from '@/stores/cat'
 import { useModelStore } from '@/stores/model'
-import { getCursorMonitor } from '@/utils/monitor'
+import { peekCursorMonitor, refreshMonitorCache } from '@/utils/monitor'
+
+const MOUSE_PARAMETER_IDS = ['ParamMouseX', 'ParamMouseY', 'ParamAngleX', 'ParamAngleY'] as const
+const MOUSE_FOLLOW_SPEED = 40
+const MOUSE_FOLLOW_STOP_EPSILON = 0.001
+const MAX_MOUSE_FOLLOW_DT_MS = 48
+const DEFAULT_MOUSE_RATIO = 0.5
+const parameterRanges = new Map<string, { min: number, max: number }>()
+const modelSize = ref<ModelSize>()
+let targetMouseXRatio = DEFAULT_MOUSE_RATIO
+let targetMouseYRatio = DEFAULT_MOUSE_RATIO
+let renderedMouseXRatio = DEFAULT_MOUSE_RATIO
+let renderedMouseYRatio = DEFAULT_MOUSE_RATIO
+let hasRenderedMouseRatio = false
+let mouseFollowFrameId: number | undefined
+let lastMouseFollowAt = 0
+let lastResolvedMouseMonitor: Monitor | undefined
+
+function clampRatio(value: number) {
+  return Math.max(0, Math.min(1, value))
+}
+
+function getFollowAlpha(dtSeconds: number) {
+  return 1 - Math.exp(-MOUSE_FOLLOW_SPEED * dtSeconds)
+}
 
 export interface ModelSize {
   width: number
   height: number
 }
 
+function stopMouseFollowLoop() {
+  if (mouseFollowFrameId) {
+    cancelAnimationFrame(mouseFollowFrameId)
+    mouseFollowFrameId = void 0
+  }
+
+  lastMouseFollowAt = 0
+}
+
+function resetMouseFollowState() {
+  stopMouseFollowLoop()
+  targetMouseXRatio = DEFAULT_MOUSE_RATIO
+  targetMouseYRatio = DEFAULT_MOUSE_RATIO
+  renderedMouseXRatio = DEFAULT_MOUSE_RATIO
+  renderedMouseYRatio = DEFAULT_MOUSE_RATIO
+  hasRenderedMouseRatio = false
+  lastResolvedMouseMonitor = void 0
+}
+
 export function useModel() {
   const getAppWindow = () => getCurrentWebviewWindow()
   const modelStore = useModelStore()
   const catStore = useCatStore()
-  const modelSize = ref<ModelSize>()
+
+  const getParameterRange = (id: string) => {
+    const cachedRange = parameterRanges.get(id)
+
+    if (cachedRange) {
+      return cachedRange
+    }
+
+    const { min, max } = live2d.getParameterRange(id)
+
+    if (isNil(min) || isNil(max)) {
+      return { min, max }
+    }
+
+    const nextRange = { min, max }
+
+    parameterRanges.set(id, nextRange)
+
+    return nextRange
+  }
+
+  const applyRenderedMouseRatios = () => {
+    if (!live2d.model) return
+
+    for (const id of MOUSE_PARAMETER_IDS) {
+      const { min, max } = getParameterRange(id)
+
+      if (isNil(min) || isNil(max)) continue
+
+      const isXAxis = id.endsWith('X')
+      const ratio = isXAxis ? renderedMouseXRatio : renderedMouseYRatio
+      let value = max - (ratio * (max - min))
+
+      if (isXAxis && catStore.model.mouseMirror) {
+        value *= -1
+      }
+
+      live2d.setParameterValue(id, value)
+    }
+  }
+
+  const stepMouseFollow = (timestamp: number) => {
+    mouseFollowFrameId = void 0
+
+    if (!hasRenderedMouseRatio || !live2d.model) {
+      lastMouseFollowAt = timestamp
+      return
+    }
+
+    const deltaMs = lastMouseFollowAt
+      ? Math.min(Math.max(timestamp - lastMouseFollowAt, 0), MAX_MOUSE_FOLLOW_DT_MS)
+      : 16.667
+    const alpha = getFollowAlpha(deltaMs / 1000)
+
+    lastMouseFollowAt = timestamp
+    renderedMouseXRatio += (targetMouseXRatio - renderedMouseXRatio) * alpha
+    renderedMouseYRatio += (targetMouseYRatio - renderedMouseYRatio) * alpha
+
+    const xSettled = Math.abs(targetMouseXRatio - renderedMouseXRatio) <= MOUSE_FOLLOW_STOP_EPSILON
+    const ySettled = Math.abs(targetMouseYRatio - renderedMouseYRatio) <= MOUSE_FOLLOW_STOP_EPSILON
+
+    if (xSettled) {
+      renderedMouseXRatio = targetMouseXRatio
+    }
+
+    if (ySettled) {
+      renderedMouseYRatio = targetMouseYRatio
+    }
+
+    applyRenderedMouseRatios()
+
+    if (!xSettled || !ySettled) {
+      mouseFollowFrameId = requestAnimationFrame(stepMouseFollow)
+    }
+  }
+
+  const ensureMouseFollowLoop = () => {
+    if (mouseFollowFrameId) return
+
+    lastMouseFollowAt = performance.now()
+    mouseFollowFrameId = requestAnimationFrame(stepMouseFollow)
+  }
+
+  const updateMouseTargetRatios = (cursorPoint: MonitorPoint) => {
+    const resolvedMonitor = peekCursorMonitor(cursorPoint)
+
+    if (resolvedMonitor) {
+      lastResolvedMouseMonitor = resolvedMonitor
+    } else {
+      void refreshMonitorCache()
+    }
+
+    const monitor = resolvedMonitor ?? lastResolvedMouseMonitor
+
+    if (!monitor) return false
+
+    const { size, position } = monitor
+
+    targetMouseXRatio = clampRatio((cursorPoint.x - position.x) / size.width)
+    targetMouseYRatio = clampRatio((cursorPoint.y - position.y) / size.height)
+
+    return true
+  }
 
   async function handleLoad() {
     try {
@@ -36,8 +182,10 @@ export function useModel() {
       const { width, height, ...rest } = await live2d.load(path)
 
       modelSize.value = { width, height }
+      parameterRanges.clear()
 
       handleResize()
+      applyRenderedMouseRatios()
 
       Object.assign(modelStore, rest)
     } catch (error) {
@@ -46,6 +194,8 @@ export function useModel() {
   }
 
   function handleDestroy() {
+    parameterRanges.clear()
+    resetMouseFollowState()
     live2d.destroy()
   }
 
@@ -107,37 +257,32 @@ export function useModel() {
     live2d.setParameterValue(id, pressed)
   }
 
-  async function handleMouseMove(
-    cursorPoint: MonitorPoint,
-    { isLatest = () => true }: { isLatest?: () => boolean } = {},
-  ) {
-    if (!isLatest() || !live2d.model) return
-
-    const monitor = await getCursorMonitor(cursorPoint)
-
-    if (!monitor || !isLatest() || !live2d.model) return
-
-    const { size, position } = monitor
-
-    const xRatio = (cursorPoint.x - position.x) / size.width
-    const yRatio = (cursorPoint.y - position.y) / size.height
-
-    for (const id of ['ParamMouseX', 'ParamMouseY', 'ParamAngleX', 'ParamAngleY']) {
-      const { min, max } = live2d.getParameterRange(id)
-
-      if (isNil(min) || isNil(max)) continue
-
-      const isXAxis = id.endsWith('X')
-
-      const ratio = isXAxis ? xRatio : yRatio
-      let value = max - (ratio * (max - min))
-
-      if (isXAxis && catStore.model.mouseMirror) {
-        value *= -1
-      }
-
-      live2d.setParameterValue(id, value)
+  function handleMouseMove(cursorPoint: MonitorPoint) {
+    if (!updateMouseTargetRatios(cursorPoint)) {
+      return
     }
+
+    if (!hasRenderedMouseRatio) {
+      renderedMouseXRatio = targetMouseXRatio
+      renderedMouseYRatio = targetMouseYRatio
+      hasRenderedMouseRatio = true
+
+      applyRenderedMouseRatios()
+      return
+    }
+
+    const xSettled = Math.abs(targetMouseXRatio - renderedMouseXRatio) <= MOUSE_FOLLOW_STOP_EPSILON
+    const ySettled = Math.abs(targetMouseYRatio - renderedMouseYRatio) <= MOUSE_FOLLOW_STOP_EPSILON
+
+    if (xSettled && ySettled) {
+      renderedMouseXRatio = targetMouseXRatio
+      renderedMouseYRatio = targetMouseYRatio
+      applyRenderedMouseRatios()
+      stopMouseFollowLoop()
+      return
+    }
+
+    ensureMouseFollowLoop()
   }
 
   async function handleAxisChange(id: string, value: number) {
