@@ -1,6 +1,5 @@
 <script setup lang="ts">
 import { convertFileSrc } from '@tauri-apps/api/core'
-import { PhysicalSize } from '@tauri-apps/api/dpi'
 import { Menu } from '@tauri-apps/api/menu'
 import { sep } from '@tauri-apps/api/path'
 import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow'
@@ -25,7 +24,7 @@ import { clearObject } from '@/utils/shared'
 
 const { startListening } = useDevice()
 const appWindow = getCurrentWebviewWindow()
-const { modelSize, handleLoad, handleDestroy, handleResize, handleKeyChange } = useModel()
+const { modelSize, handleLoad, handleDestroy, handleResize, syncWindowSize, handleKeyChange } = useModel()
 const catStore = useCatStore()
 const { getSharedMenu } = useSharedMenu()
 const modelStore = useModelStore()
@@ -57,6 +56,7 @@ watch(() => modelStore.currentModel, async (model) => {
   if (!model) return
 
   await handleLoad()
+  await syncWindowSize()
 
   const path = join(model.path, 'resources', 'background.png')
 
@@ -84,18 +84,11 @@ watch(() => modelStore.currentModel, async (model) => {
   setWindowPosition()
 }, { deep: true, immediate: true })
 
-watch([() => catStore.window.scale, modelSize], async ([scale, modelSize]) => {
-  if (!modelSize) return
+watch(() => catStore.window.scale, async () => {
+  if (!modelSize.value) return
 
-  const { width, height } = modelSize
-
-  appWindow.setSize(
-    new PhysicalSize({
-      width: Math.round(width * (scale / 100)),
-      height: Math.round(height * (scale / 100)),
-    }),
-  )
-}, { immediate: true })
+  await syncWindowSize()
+})
 
 watch([modelStore.pressedKeys, stickActive], ([keys, stickActive]) => {
   const dirs = Object.values(keys).map((path) => {

@@ -28,6 +28,12 @@ export function useWindowState() {
 
     if (minimized) return
 
+    const isSizePayload = 'width' in event.payload && 'height' in event.payload
+
+    if (label === 'main' && isSizePayload) {
+      return
+    }
+
     appStore.windowState[label] ??= {}
 
     Object.assign(appStore.windowState[label], event.payload)
@@ -53,7 +59,7 @@ export function useWindowState() {
       }
     }
 
-    if (width && height) {
+    if (label !== 'main' && width && height) {
       await appWindow.setSize(new PhysicalSize(width, height))
     }
 

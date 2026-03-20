@@ -13,9 +13,23 @@ import { i18n } from '@/locales'
 
 Live2DModel.registerTicker(Ticker)
 
+type FrameListener = (deltaMs: number) => void
+
 class Live2d {
   private app: Application | null = null
   public model: Live2DModel | null = null
+  private readonly frameListeners = new Set<FrameListener>()
+  private isFrameListenerAttached = false
+
+  private readonly handleFrame = () => {
+    if (!this.app || this.frameListeners.size === 0) return
+
+    const deltaMs = this.app.ticker.deltaMS
+
+    for (const listener of [...this.frameListeners]) {
+      listener(deltaMs)
+    }
+  }
 
   constructor() { }
 
@@ -30,6 +44,24 @@ class Live2d {
       backgroundAlpha: 0,
       resolution: devicePixelRatio,
     })
+
+    this.syncFrameListeners()
+  }
+
+  private syncFrameListeners() {
+    if (!this.app) return
+
+    const shouldAttach = this.frameListeners.size > 0
+
+    if (shouldAttach === this.isFrameListenerAttached) return
+
+    if (shouldAttach) {
+      this.app.ticker.add(this.handleFrame)
+    } else {
+      this.app.ticker.remove(this.handleFrame)
+    }
+
+    this.isFrameListenerAttached = shouldAttach
   }
 
   public async load(path: string) {
@@ -127,6 +159,16 @@ class Live2d {
     const coreModel = this.getCoreModel()
 
     return coreModel?.setParameterValueById?.(id, Number(value))
+  }
+
+  public addFrameListener(listener: FrameListener) {
+    this.frameListeners.add(listener)
+    this.syncFrameListeners()
+  }
+
+  public removeFrameListener(listener: FrameListener) {
+    this.frameListeners.delete(listener)
+    this.syncFrameListeners()
   }
 }
 
